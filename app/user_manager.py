@@ -12,6 +12,9 @@ from comfy.cli_args import args
 import folder_paths
 from .app_settings import AppSettings
 from typing import TypedDict
+from app.database import db
+from app.database.models import User
+from sqlalchemy.orm import Session
 
 default_user = "default"
 
@@ -44,13 +47,50 @@ class UserManager():
                 logging.warning("****** For multi-user setups add the --multi-user CLI argument to enable multiple user profiles. ******")
 
         if args.multi_user:
-            if os.path.isfile(self.get_users_file()):
-                with open(self.get_users_file()) as f:
-                    self.users = json.load(f)
-            else:
-                self.users = {}
+            # We do not load users into memory anymore if using DB
+            # But for legacy/fallback we might need to know if we are in DB mode
+            pass
         else:
-            self.users = {"default": "default"}
+            # Single user mode (default)
+            pass
+
+    def _get_session(self):
+        if db.dependencies_available() and db.Session:
+            return db.create_session()
+        return None
+
+    def get_user_by_id(self, user_id):
+        session = self._get_session()
+        if session:
+            try:
+                user = session.query(User).filter(User.id == user_id).first()
+                if user:
+                    return user.username
+            finally:
+                session.close()
+            return None
+        
+        # Fallback to JSON
+        if os.path.isfile(self.get_users_file()):
+             with open(self.get_users_file()) as f:
+                 users = json.load(f)
+                 return users.get(user_id)
+        return None
+
+    def get_all_users(self):
+        session = self._get_session()
+        if session:
+            try:
+                users = session.query(User).all()
+                return {u.id: u.username for u in users}
+            finally:
+                session.close()
+        
+        # Fallback
+        if os.path.isfile(self.get_users_file()):
+             with open(self.get_users_file()) as f:
+                 return json.load(f)
+        return {}
 
     def get_users_file(self):
         return os.path.join(folder_paths.get_user_directory(), "users.json")
@@ -63,8 +103,15 @@ class UserManager():
             if user.startswith(folder_paths.SYSTEM_USER_PREFIX):
                 raise KeyError("Unknown user: " + user)
 
-        if user not in self.users:
-            raise KeyError("Unknown user: " + user)
+        if user not in self.get_all_users():
+             # Optimization: if DB, check specifically?
+             # For now, get_all_users() is fine for small user bases
+             # But better to use get_user_by_id logic
+             if args.multi_user:
+                 if not self.get_user_by_id(user):
+                      raise KeyError("Unknown user: " + user)
+             elif user != "default":
+                  raise KeyError("Unknown user: " + user)
 
         return user
 
@@ -112,10 +159,27 @@ class UserManager():
             raise ValueError("System User prefix not allowed")
         user_id = user_id + "_" + str(uuid.uuid4())
 
-        self.users[user_id] = name
-
-        with open(self.get_users_file(), "w") as f:
-            json.dump(self.users, f)
+        # self.users[user_id] = name <-- Removed memory cache
+        
+        session = self._get_session()
+        if session:
+            try:
+                new_user = User(id=user_id, username=name)
+                session.add(new_user)
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                raise e
+            finally:
+                session.close()
+        else:
+            # Fallback JSON
+            users = self.get_all_users()
+            users[user_id] = name
+            temp_file = self.get_users_file() + ".tmp"
+            with open(temp_file, "w") as f:
+                json.dump(users, f)
+            os.replace(temp_file, self.get_users_file())
 
         return user_id
 
@@ -125,7 +189,7 @@ class UserManager():
         @routes.get("/users")
         async def get_users(request):
             if args.multi_user:
-                return web.json_response({"storage": "server", "users": self.users})
+                return web.json_response({"storage": "server", "users": self.get_all_users()})
             else:
                 user_dir = self.get_request_user_filepath(request, None, create_dir=False)
                 return web.json_response({
@@ -137,7 +201,10 @@ class UserManager():
         async def post_users(request):
             body = await request.json()
             username = body["username"]
-            if username in self.users.values():
+            
+            # Check for duplicate
+            all_users = self.get_all_users()
+            if username in all_users.values():
                 return web.json_response({"error": "Duplicate username."}, status=400)
 
             try:

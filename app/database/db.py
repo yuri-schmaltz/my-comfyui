@@ -65,48 +65,61 @@ def get_db_path():
         raise ValueError(f"Unsupported database URL '{url}'.")
 
 
+from .models import Base, User
+import json
+import folder_paths
+
 def init_db():
+    if not dependencies_available():
+        logging.info("Running in File-Based Mode (DB dependencies missing). persistence via JSON.")
+        return
+
     db_url = args.database_url
     logging.debug(f"Database URL: {db_url}")
-    db_path = get_db_path()
-    db_exists = os.path.exists(db_path)
-
-    config = get_alembic_config()
-
-    # Check if we need to upgrade
+    
+    # Create engine
     engine = create_engine(db_url)
-    conn = engine.connect()
-
-    context = MigrationContext.configure(conn)
-    current_rev = context.get_current_revision()
-
-    script = ScriptDirectory.from_config(config)
-    target_rev = script.get_current_head()
-
-    if target_rev is None:
-        logging.warning("No target revision found.")
-    elif current_rev != target_rev:
-        # Backup the database pre upgrade
-        backup_path = db_path + ".bkp"
-        if db_exists:
-            shutil.copy(db_path, backup_path)
-        else:
-            backup_path = None
-
-        try:
-            command.upgrade(config, target_rev)
-            logging.info(f"Database upgraded from {current_rev} to {target_rev}")
-        except Exception as e:
-            if backup_path:
-                # Restore the database from backup if upgrade fails
-                shutil.copy(backup_path, db_path)
-                os.remove(backup_path)
-            logging.exception("Error upgrading database: ")
-            raise e
-
+    
+    # Create tables (No-op if exist)
+    Base.metadata.create_all(engine)
+    
     global Session
     Session = sessionmaker(bind=engine)
+    
+    # Auto-Migration: JSON -> SQLite
+    session = Session()
+    try:
+        # Check if DB is empty
+        try:
+            user_count = session.query(User).count()
+        except Exception:
+            user_count = 0
+            
+        if user_count == 0:
+            user_file = os.path.join(folder_paths.get_user_directory(), "users.json")
+            if os.path.exists(user_file):
+                logging.info("[DB] Database empty. Migrating users from JSON...")
+                try:
+                    with open(user_file, 'r') as f:
+                        users_data = json.load(f)
+                        
+                    if isinstance(users_data, dict):
+                        count = 0
+                        for uid, uname in users_data.items():
+                            # Avoid duplicates just in case
+                            if not session.query(User).filter_by(id=uid).first():
+                                user = User(id=str(uid), username=str(uname))
+                                session.add(user)
+                                count += 1
+                        session.commit()
+                        logging.info(f"[DB] Successfully migrated {count} users.")
+                    else:
+                        logging.warning("[DB] users.json format unexpected. Skipping.")
+                except Exception as e:
+                    logging.error(f"[DB] Migration failed: {e}")
+    except Exception as e:
+        logging.error(f"[DB] Initialization error: {e}")
+    finally:
+        session.close()
 
-
-def create_session():
-    return Session()
+    create_session = Session
