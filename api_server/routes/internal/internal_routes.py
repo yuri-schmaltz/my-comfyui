@@ -69,6 +69,21 @@ class InternalRoutes:
             )
             return web.json_response([entry.name for entry in sorted_files], status=200)
 
+        @self.routes.get('/metrics')
+        async def get_metrics(request):
+            queue = self.prompt_server.prompt_queue.get_current_queue()
+            # queue returns (running_queue, pending_queue)
+            
+            # Simple uptime calc (assuming server started when this object init, not perfect but okay)
+            # Actually prompt_server doesn't store start time publicly.
+            # Using basic system uptime or just Returning queue stats is safer.
+            
+            return web.json_response({
+                "queue_running": len(queue[0]),
+                "queue_pending": len(queue[1]),
+                "job_count": self.prompt_server.number # Total jobs submitted counter
+            })
+
 
     def get_app(self):
         if self._app is None:

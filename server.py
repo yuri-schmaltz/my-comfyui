@@ -46,6 +46,7 @@ from protocol import BinaryEventTypes
 # Import cache control middleware
 from middleware.cache_middleware import cache_control
 from app.middleware.auth_middleware import auth_middleware
+from app.middleware.request_id_middleware import request_id_middleware
 
 if args.enable_manager:
     import comfyui_manager
@@ -212,7 +213,7 @@ class PromptServer():
         self.client_session:Optional[aiohttp.ClientSession] = None
         self.number = 0
 
-        middlewares = [cache_control, deprecation_warning, auth_middleware]
+        middlewares = [request_id_middleware, cache_control, deprecation_warning, auth_middleware]
         if args.enable_compress_response_body:
             middlewares.append(compress_body)
 
